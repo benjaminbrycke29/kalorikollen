@@ -33,15 +33,11 @@ def hamta_dagbok():
         # --- FIX: Tvätta siffrorna så 25,2 och 25.2 funkar ---
         if not df.empty:
             cols_to_fix = ['Kcal', 'Protein', 'Kolh', 'Fett', 'Kostnad']
-            
             for col in cols_to_fix:
                 if col in df.columns:
-                    # 1. Gör om allt till text först
-                    # 2. Byt ut komma mot punkt
-                    # 3. Tvinga till siffra (kraschar det så sätts 0)
+                    # Byt komma mot punkt och gör till siffra
                     df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-                    
         return df
     except:
         return pd.DataFrame()
@@ -85,63 +81,118 @@ sida = st.sidebar.radio("Meny", ["📊 Statistik & Översikt", "🍽 Logga Mat"]
 if sida == "📊 Statistik & Översikt":
     st.header(f"Dagens status ({DAGENS_DATUM})")
     
-    # 1. Sätt ditt mål (du kan ändra detta med en slider)
-    mal_kcal = st.sidebar.slider("Ditt Kalorimål:", 1500, 4000, 2500)
-    
+    # --- INSTÄLLNINGAR FÖR MÅL ---
+    with st.sidebar.expander("🎯 Dina Mål & Macros", expanded=True):
+        mal_kcal = st.slider("Kalorimål:", 1500, 4000, 2500)
+        st.write("---")
+        st.write("**Fördelning (%)**")
+        mal_prot_proc = st.slider("Protein %", 10, 60, 30)
+        mal_fett_proc = st.slider("Fett %", 10, 60, 35)
+        # Kolhydrater blir det som blir över (så det alltid blir 100%)
+        mal_kolh_proc = 100 - (mal_prot_proc + mal_fett_proc)
+        st.info(f"Kolhydrater: {mal_kolh_proc}% (Automatiskt)")
+        
+        if mal_kolh_proc < 0:
+            st.error("Oj! Protein + Fett är mer än 100%!")
+
+    # --- RÄKNA UT MÅL I GRAM ---
+    # Protein/Kolh = 4 kcal/g. Fett = 9 kcal/g.
+    target_prot_g = round((mal_kcal * (mal_prot_proc / 100)) / 4)
+    target_fett_g = round((mal_kcal * (mal_fett_proc / 100)) / 9)
+    target_kolh_g = round((mal_kcal * (mal_kolh_proc / 100)) / 4)
+
     # 2. Hämta datan
     df = hamta_dagbok()
     
     if not df.empty:
-        # Filtrera så vi bara ser DAGENS mat
-        # (Förutsätter att kolumn A heter 'Datum')
-        dagens_mat = df[df['Datum'] == DAGENS_DATUM]
+        # Filtrera fram dagens mat
+        if 'Datum' in df.columns:
+             dagens_mat = df[df['Datum'] == DAGENS_DATUM]
+        else:
+             st.error("Hittar ingen kolumn som heter 'Datum' i din Excel-fil.")
+             dagens_mat = pd.DataFrame() # Tom
         
         if not dagens_mat.empty:
             # Summera allt
-            tot_kcal = dagens_mat['Kcal'].sum()
-            tot_prot = dagens_mat['Protein'].sum()
-            tot_kolh = dagens_mat['Kolh'].sum() # Kolla att din kolumn heter Kolh
-            tot_fett = dagens_mat['Fett'].sum()
-            tot_kostnad = dagens_mat['Kostnad'].sum() # Kolla att din kolumn heter Kostnad
+            tot_kcal = int(dagens_mat['Kcal'].sum())
+            tot_prot = int(dagens_mat['Protein'].sum())
+            tot_kolh = int(dagens_mat['Kolh'].sum())
+            tot_fett = int(dagens_mat['Fett'].sum())
+            tot_kostnad = int(dagens_mat['Kostnad'].sum())
             
             # --- KPI:er (Stora siffror) ---
-            kvar = mal_kcal - tot_kcal
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Ätet idag", f"{tot_kcal} kcal", delta=f"{kvar} kvar")
-            col2.metric("Protein", f"{tot_prot} g")
-            col3.metric("Dagens Kostnad", f"{tot_kostnad} kr")
+            # Vi räknar ut "kvar" (delta)
+            kvar_kcal = mal_kcal - tot_kcal
+            kvar_prot = target_prot_g - tot_prot
+            kvar_kolh = target_kolh_g - tot_kolh
+            kvar_fett = target_fett_g - tot_fett
+
+            # Rad 1: Kalorier & Kostnad
+            c1, c2 = st.columns(2)
+            c1.metric("🔥 Kalorier", f"{tot_kcal}", f"{kvar_kcal} kvar")
+            c2.metric("💰 Kostnad", f"{tot_kostnad} kr")
             
-            # --- PROGRESS BAR ---
-            st.write(f"Du har ätit **{int((tot_kcal/mal_kcal)*100)}%** av ditt mål.")
             st.progress(min(tot_kcal / mal_kcal, 1.0))
             
             st.divider()
+
+            # Rad 2: Makronutrienter (Med jämförelse!)
+            m1, m2, m3 = st.columns(3)
             
-            # --- CIRKELDIAGRAM (Macros) ---
-            c1, c2 = st.columns(2)
+            # Helper för att visa färg om man gått över
+            def show_macro(label, current, target, left):
+                color = "normal"
+                if left < 0: 
+                    label += " (Över!)"
+                    color = "inverse"
+                st.metric(label, f"{current}g", f"{left}g kvar", delta_color=color)
+
+            with m1:
+                show_macro("Protein", tot_prot, target_prot_g, kvar_prot)
+                st.caption(f"Mål: {target_prot_g}g")
+                st.progress(min(tot_prot / target_prot_g, 1.0) if target_prot_g > 0 else 0)
+
+            with m2:
+                show_macro("Kolhydrater", tot_kolh, target_kolh_g, kvar_kolh)
+                st.caption(f"Mål: {target_kolh_g}g")
+                st.progress(min(tot_kolh / target_kolh_g, 1.0) if target_kolh_g > 0 else 0)
+
+            with m3:
+                show_macro("Fett", tot_fett, target_fett_g, kvar_fett)
+                st.caption(f"Mål: {target_fett_g}g")
+                st.progress(min(tot_fett / target_fett_g, 1.0) if target_fett_g > 0 else 0)
             
-            with c1:
-                st.subheader("Makrofördelning")
-                # Skapa data för diagrammet
+            st.divider()
+            
+            # --- CIRKELDIAGRAM ---
+            c_chart, c_list = st.columns([1, 1])
+            
+            with c_chart:
+                st.subheader("Fördelning")
                 macro_data = pd.DataFrame({
                     'Macro': ['Protein', 'Kolhydrater', 'Fett'],
                     'Gram': [tot_prot, tot_kolh, tot_fett]
                 })
-                fig = px.pie(macro_data, values='Gram', names='Macro', hole=0.4, color_discrete_sequence=px.colors.sequential.RdBu)
-                st.plotly_chart(fig, use_container_width=True)
-                
-            with c2:
-                st.subheader("Vad har du ätit?")
-                # Visa en enkel lista på dagens mat
-                st.dataframe(dagens_mat[['Måltid', 'Vara', 'Mängd', 'Kcal']], hide_index=True)
+                # Om man inte ätit något än kraschar diagrammet, så vi kollar:
+                if tot_prot + tot_kolh + tot_fett > 0:
+                    fig = px.pie(macro_data, values='Gram', names='Macro', hole=0.5, 
+                                 color_discrete_sequence=['#ff4b4b', '#1f77b4', '#ff7f0e'])
+                    fig.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=250)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.write("Ät något för att se diagrammet! 🍕")
+
+            with c_list:
+                st.subheader("Dagens måltider")
+                st.dataframe(dagens_mat[['Måltid', 'Vara', 'Mängd', 'Kcal']], hide_index=True, height=250)
                 
         else:
-            st.info("Du har inte loggat något idag än. Gå till 'Logga Mat'!")
+            st.info(f"Ingen mat loggad för {DAGENS_DATUM}. Gå till 'Logga Mat'!")
     else:
-        st.warning("Dagboken är tom eller kunde inte läsas.")
+        st.warning("Kunde inte läsa dagboken. Kolla att fliken heter 'Dagbok' och har rätt rubriker.")
 
 # ---------------------------------------------------------
-# SIDA 2: LOGGA MAT (Samma som förut men uppstädad)
+# SIDA 2: LOGGA MAT
 # ---------------------------------------------------------
 elif sida == "🍽 Logga Mat":
     st.header("Lägg till måltid")
@@ -191,21 +242,13 @@ elif sida == "🍽 Logga Mat":
         c1, c2, c3 = st.columns(3)
         c1.metric("Kcal/100g", vald_vara['Kcal'])
         c2.metric("Protein", vald_vara['Protein'])
-        c3.metric("Pris (Databas)", f"{vald_vara.get('Pris', 0)} kr")
+        c3.metric("Pris (ca)", f"{vald_vara.get('Pris', 0)} kr")
 
         with st.form("log_form"):
             col_a, col_b = st.columns(2)
             mangd = col_a.number_input("Mängd (g):", value=100)
             maltid = col_b.selectbox("Måltid:", ["Frukost", "Lunch", "Middag", "Mellanmål"])
             
-            # Räkna ut kostnad
-            pris_forslag = 0.0
-            # Om vi har sparat pris i databasen kan vi försöka gissa kostnaden för portionen
-            if vald_vara.get('Pris'):
-                # En enkel gissning: Vi antar att priset i databasen är per 100g (eller paket). 
-                # Låt oss hålla det manuellt tills vidare för att inte krångla till det.
-                pass
-
             kostnad = st.number_input("Kostnad för denna portion (kr):", min_value=0.0, step=1.0)
             
             submitted = st.form_submit_button("Spara till Dagboken ✅")
@@ -224,11 +267,9 @@ elif sida == "🍽 Logga Mat":
                     kostnad
                 ]
                 
-                # Spara till dagbok
                 sheet_dagbok = get_sheet("Dagbok")
                 sheet_dagbok.append_row(rad_dagbok)
                 
-                # Om ny vara, spara till snabblista
                 if metod != "🔍 Sök i min lista":
                     try:
                         sheet_db = get_sheet("Databas")
