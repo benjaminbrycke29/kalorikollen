@@ -3,3 +3,5 @@ gspread
 requests
 pyzbar
 pillow
+pandas
+plotly

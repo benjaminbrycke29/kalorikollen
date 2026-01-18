@@ -1,12 +1,15 @@
 import streamlit as st
 import gspread
 import requests
+import pandas as pd
+import plotly.express as px
 from datetime import datetime
 from pyzbar.pyzbar import decode
 from PIL import Image, ImageEnhance
 
 # --- INSTÄLLNINGAR ---
 SHEET_NAME = "kalorikollen"
+DAGENS_DATUM = datetime.now().strftime("%Y-%m-%d")
 
 # --- KOPPLING MOT GOOGLE ---
 @st.cache_resource
@@ -21,13 +24,20 @@ def get_sheet(tab_name):
     client = get_client()
     return client.open(SHEET_NAME).worksheet(tab_name)
 
-# Hämta alla matvaror vi redan sparat (för sökfunktionen)
+def hamta_dagbok():
+    try:
+        sheet = get_sheet("Dagbok")
+        data = sheet.get_all_records()
+        df = pd.DataFrame(data)
+        return df
+    except:
+        return pd.DataFrame()
+
 def hamta_sparade_varor():
     try:
         sheet = get_sheet("Databas")
-        # Hämtar alla namn (kolumn A) och deras data
         data = sheet.get_all_records()
-        return data # Returnerar en lista med lexikon
+        return data
     except:
         return []
 
@@ -44,147 +54,175 @@ def hamta_fran_api(streckkod):
                 'Protein': nutri.get('proteins_100g', 0),
                 'Kolhydrater': nutri.get('carbohydrates_100g', 0),
                 'Fett': nutri.get('fat_100g', 0),
-                'Pris': 0 # API vet inte pris
+                'Pris': 0
             }
     except:
         return None
     return None
 
 # --- APPENS UTSEENDE ---
-st.title("🍎 Min Matdagbok")
+st.title("🍎 Min Mat-App")
 
-# Sidomeny för navigation
-sida = st.sidebar.radio("Meny", ["Logga Mat", "Statistik (Kommer snart)"])
+# Sidomeny
+sida = st.sidebar.radio("Meny", ["📊 Statistik & Översikt", "🍽 Logga Mat"])
 
-if sida == "Logga Mat":
+# ---------------------------------------------------------
+# SIDA 1: STATISTIK (DASHBOARD)
+# ---------------------------------------------------------
+if sida == "📊 Statistik & Översikt":
+    st.header(f"Dagens status ({DAGENS_DATUM})")
     
-    # 1. Välj hur vi hittar maten
-    metod = st.radio("Hitta vara:", ["🔍 Sök i min lista", "📷 Kamera", "✍️ Skriv kod"], horizontal=True)
+    # 1. Sätt ditt mål (du kan ändra detta med en slider)
+    mal_kcal = st.sidebar.slider("Ditt Kalorimål:", 1500, 4000, 2500)
     
+    # 2. Hämta datan
+    df = hamta_dagbok()
+    
+    if not df.empty:
+        # Filtrera så vi bara ser DAGENS mat
+        # (Förutsätter att kolumn A heter 'Datum')
+        dagens_mat = df[df['Datum'] == DAGENS_DATUM]
+        
+        if not dagens_mat.empty:
+            # Summera allt
+            tot_kcal = dagens_mat['Kcal'].sum()
+            tot_prot = dagens_mat['Protein'].sum()
+            tot_kolh = dagens_mat['Kolh'].sum() # Kolla att din kolumn heter Kolh
+            tot_fett = dagens_mat['Fett'].sum()
+            tot_kostnad = dagens_mat['Kostnad'].sum() # Kolla att din kolumn heter Kostnad
+            
+            # --- KPI:er (Stora siffror) ---
+            kvar = mal_kcal - tot_kcal
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Ätet idag", f"{tot_kcal} kcal", delta=f"{kvar} kvar")
+            col2.metric("Protein", f"{tot_prot} g")
+            col3.metric("Dagens Kostnad", f"{tot_kostnad} kr")
+            
+            # --- PROGRESS BAR ---
+            st.write(f"Du har ätit **{int((tot_kcal/mal_kcal)*100)}%** av ditt mål.")
+            st.progress(min(tot_kcal / mal_kcal, 1.0))
+            
+            st.divider()
+            
+            # --- CIRKELDIAGRAM (Macros) ---
+            c1, c2 = st.columns(2)
+            
+            with c1:
+                st.subheader("Makrofördelning")
+                # Skapa data för diagrammet
+                macro_data = pd.DataFrame({
+                    'Macro': ['Protein', 'Kolhydrater', 'Fett'],
+                    'Gram': [tot_prot, tot_kolh, tot_fett]
+                })
+                fig = px.pie(macro_data, values='Gram', names='Macro', hole=0.4, color_discrete_sequence=px.colors.sequential.RdBu)
+                st.plotly_chart(fig, use_container_width=True)
+                
+            with c2:
+                st.subheader("Vad har du ätit?")
+                # Visa en enkel lista på dagens mat
+                st.dataframe(dagens_mat[['Måltid', 'Vara', 'Mängd', 'Kcal']], hide_index=True)
+                
+        else:
+            st.info("Du har inte loggat något idag än. Gå till 'Logga Mat'!")
+    else:
+        st.warning("Dagboken är tom eller kunde inte läsas.")
+
+# ---------------------------------------------------------
+# SIDA 2: LOGGA MAT (Samma som förut men uppstädad)
+# ---------------------------------------------------------
+elif sida == "🍽 Logga Mat":
+    st.header("Lägg till måltid")
+    
+    metod = st.radio("Metod:", ["🔍 Sök i min lista", "📷 Kamera", "✍️ Skriv kod"], horizontal=True)
     vald_vara = None
     
-    # --- METOD 1: Sök i listan (Det du sparat tidigare) ---
     if metod == "🔍 Sök i min lista":
         sparade = hamta_sparade_varor()
         if sparade:
-            # Skapa en lista med namn för dropdown-menyn
-            namn_lista = [rad['Livsmedel'] for rad in sparade if 'Livsmedel' in rad] # Anpassa nyckel om du döpt kolumn A till 'Namn' eller 'Livsmedel' i Databas-fliken
-            
-            # OBS: Koden antar att Kolumn A heter "Livsmedel" i din Databas. 
-            # Om den heter "Namn", ändra 'Livsmedel' till 'Namn' på raden ovan.
-            
-            val = st.selectbox("Välj vara:", ["- Välj -"] + namn_lista)
-            
-            if val != "- Välj -":
-                # Hitta rätt rad i datan
+            namn_lista = [rad['Livsmedel'] for rad in sparade if 'Livsmedel' in rad]
+            val = st.selectbox("Välj vara:", ["-"] + namn_lista)
+            if val != "-":
                 for rad in sparade:
-                    if rad.get('Livsmedel') == val or rad.get('Namn') == val:
+                    if rad.get('Livsmedel') == val:
                         vald_vara = rad
-                        # Fixa så nycklarna stämmer med API-formatet
                         vald_vara['Namn'] = val
                         break
-        else:
-            st.warning("Din databas är tom. Scanna något först!")
 
-    # --- METOD 2: Kamera ---
     elif metod == "📷 Kamera":
         img_file = st.camera_input("Fota streckkoden")
         if img_file:
             img = Image.open(img_file)
-            # (Här kör vi din bild-magi för bättre scanning)
             gray = img.convert('L')
             enhancer = ImageEnhance.Contrast(gray)
             high_contrast = enhancer.enhance(3.0)
-            
-            # Testa läsa
             decoded = decode(high_contrast)
             if not decoded:
-                decoded = decode(img) # Testa originalbilden också
-                
+                decoded = decode(img)
+            
             if decoded:
                 kod = decoded[0].data.decode("utf-8")
                 st.success(f"Kod: {kod}")
                 vald_vara = hamta_fran_api(kod)
             else:
-                st.warning("Hittade ingen kod.")
+                st.warning("Ingen kod hittad.")
 
-    # --- METOD 3: Manuell Kod ---
     elif metod == "✍️ Skriv kod":
         kod = st.text_input("Streckkod:")
         if kod:
             vald_vara = hamta_fran_api(kod)
 
-    # --- OM VI HITTAT EN VARA (Oavsett metod) ---
     if vald_vara:
         st.divider()
-        st.subheader(f"Mat: {vald_vara['Namn']}")
+        st.subheader(f"{vald_vara['Namn']}")
         
-        # Visa per 100g
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         c1.metric("Kcal/100g", vald_vara['Kcal'])
         c2.metric("Protein", vald_vara['Protein'])
-        c3.metric("Kolh", vald_vara['Kolhydrater'])
-        c4.metric("Fett", vald_vara['Fett'])
-        
-        # --- LOGGA TILL DAGBOK ---
-        st.info("🍽 Lägg till i dagboken")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-            mangd = st.number_input("Mängd (gram):", value=100, step=10)
-        with col_b:
-            maltid = st.selectbox("Måltid:", ["Frukost", "Lunch", "Middag", "Mellanmål"])
-            
-        # Räkna ut totalen för portionen
-        faktor = mangd / 100
-        tot_kcal = round(vald_vara['Kcal'] * faktor)
-        tot_prot = round(vald_vara['Protein'] * faktor, 1)
-        tot_kolh = round(vald_vara['Kolhydrater'] * faktor, 1)
-        tot_fett = round(vald_vara['Fett'] * faktor, 1)
-        
-        # Prisräknare (om pris finns i databasen)
-        pris_per_kg = vald_vara.get('Pris', 0) # Om du sparat pris i databasen
-        # Om API användes är priset 0, låt användaren fylla i
-        tot_pris = 0
-        if pris_per_kg:
-             # Om priset är sparat som kr/st eller kr/paket blir detta lite skevt, 
-             # men vi antar kr/förpackning och låter användaren justera nedan.
-             pass 
-        
-        tot_kostnad = st.number_input("Kostnad för denna portion (kr):", min_value=0.0, step=1.0)
+        c3.metric("Pris (Databas)", f"{vald_vara.get('Pris', 0)} kr")
 
-        # Visa vad som kommer loggas
-        st.write(f"📊 **Totalt för {mangd}g:** {tot_kcal} kcal | {tot_prot}g Protein")
-        
-        if st.button("Logga i Dagboken ✅"):
-            datum = datetime.now().strftime("%Y-%m-%d")
+        with st.form("log_form"):
+            col_a, col_b = st.columns(2)
+            mangd = col_a.number_input("Mängd (g):", value=100)
+            maltid = col_b.selectbox("Måltid:", ["Frukost", "Lunch", "Middag", "Mellanmål"])
             
-            # Förbered raden för Dagbok-fliken
-            rad_dagbok = [
-                datum, maltid, vald_vara['Namn'], mangd, 
-                tot_kcal, tot_prot, tot_kolh, tot_fett, tot_kostnad
-            ]
-            
-            sheet_dagbok = get_sheet("Dagbok")
-            sheet_dagbok.append_row(rad_dagbok)
-            
-            # Om varan kom från API (inte fanns i listan), spara den till Databasen också!
-            # Så vi slipper scanna den nästa gång.
-            if metod != "🔍 Sök i min lista":
-                try:
-                    sheet_db = get_sheet("Databas")
-                    # Kolla så vi inte dubbelsparar (enkelt check) kan läggas till sen
-                    rad_db = [
-                        vald_vara['Namn'], vald_vara['Kcal'], vald_vara['Protein'], 
-                        vald_vara['Kolhydrater'], vald_vara['Fett'], 0 # Pris noll tills vidare
-                    ]
-                    sheet_db.append_row(rad_db)
-                    st.toast("Sparade även varan i din snabblista!")
-                except:
-                    pass
+            # Räkna ut kostnad
+            pris_forslag = 0.0
+            # Om vi har sparat pris i databasen kan vi försöka gissa kostnaden för portionen
+            if vald_vara.get('Pris'):
+                # En enkel gissning: Vi antar att priset i databasen är per 100g (eller paket). 
+                # Låt oss hålla det manuellt tills vidare för att inte krångla till det.
+                pass
 
-            st.balloons()
-            st.success("Måltiden loggad!")
-
-elif sida == "Statistik (Kommer snart)":
-    st.write("Här ska vi bygga grafer sen! 📈")
+            kostnad = st.number_input("Kostnad för denna portion (kr):", min_value=0.0, step=1.0)
+            
+            submitted = st.form_submit_button("Spara till Dagboken ✅")
+            
+            if submitted:
+                faktor = mangd / 100
+                rad_dagbok = [
+                    DAGENS_DATUM, 
+                    maltid, 
+                    vald_vara['Namn'], 
+                    mangd, 
+                    round(vald_vara['Kcal'] * faktor), 
+                    round(vald_vara['Protein'] * faktor, 1), 
+                    round(vald_vara['Kolhydrater'] * faktor, 1), 
+                    round(vald_vara['Fett'] * faktor, 1),
+                    kostnad
+                ]
+                
+                # Spara till dagbok
+                sheet_dagbok = get_sheet("Dagbok")
+                sheet_dagbok.append_row(rad_dagbok)
+                
+                # Om ny vara, spara till snabblista
+                if metod != "🔍 Sök i min lista":
+                    try:
+                        sheet_db = get_sheet("Databas")
+                        rad_db = [vald_vara['Namn'], vald_vara['Kcal'], vald_vara['Protein'], vald_vara['Kolhydrater'], vald_vara['Fett'], 0]
+                        sheet_db.append_row(rad_db)
+                    except:
+                        pass
+                
+                st.balloons()
+                st.success("Sparat!")
