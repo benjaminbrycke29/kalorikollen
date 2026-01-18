@@ -29,6 +29,19 @@ def hamta_dagbok():
         sheet = get_sheet("Dagbok")
         data = sheet.get_all_records()
         df = pd.DataFrame(data)
+        
+        # --- FIX: Tvätta siffrorna så 25,2 och 25.2 funkar ---
+        if not df.empty:
+            cols_to_fix = ['Kcal', 'Protein', 'Kolh', 'Fett', 'Kostnad']
+            
+            for col in cols_to_fix:
+                if col in df.columns:
+                    # 1. Gör om allt till text först
+                    # 2. Byt ut komma mot punkt
+                    # 3. Tvinga till siffra (kraschar det så sätts 0)
+                    df[col] = df[col].astype(str).str.replace(',', '.', regex=False)
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+                    
         return df
     except:
         return pd.DataFrame()
