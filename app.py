@@ -2,7 +2,7 @@ import streamlit as st
 import gspread
 import requests
 from pyzbar.pyzbar import decode
-from PIL import Image
+from PIL import Image, ImageEnhance
 
 # --- INSTÄLLNINGAR ---
 SHEET_NAME = "kalorikollen"
@@ -39,47 +39,64 @@ def hamta_matdata(streckkod):
 # --- APPENS UTSEENDE ---
 st.title("🍎 Min Kalorikoll")
 
-# Välj metod: Kamera eller manuell?
-metod = st.radio("Hur vill du mata in?", ["📷 Kamera", "✍️ Skriv kod"], horizontal=True)
-
+metod = st.radio("Metod:", ["📷 Kamera", "✍️ Manuell Kod"], horizontal=True)
 kod = ""
 
 if metod == "📷 Kamera":
-    # Starta kameran
-    img_file = st.camera_input("Ta en bild på streckkoden")
+    img_file = st.camera_input("Fota streckkoden")
     
     if img_file:
-        # Öppna bilden och leta efter streckkoder
-        image = Image.open(img_file)
-        decodade_objekt = decode(image)
+        # Öppna bilden
+        original_image = Image.open(img_file)
         
-        if decodade_objekt:
-            # Vi tar den första koden vi hittar
-            kod = decodade_objekt[0].data.decode("utf-8")
-            st.success(f"Scannade kod: {kod}")
-        else:
-            st.warning("Kunde inte se någon streckkod i bilden. Försök gå närmare!")
+        # --- BILD-MAGI (Förbättra bilden så datorn ser koden) ---
+        bilder_att_testa = [original_image]
+        
+        # 1. Gör svartvit
+        gray_img = original_image.convert('L')
+        bilder_att_testa.append(gray_img)
+        
+        # 2. Öka kontrasten rejält (Hjälper oftast mest)
+        enhancer = ImageEnhance.Contrast(gray_img)
+        high_contrast_img = enhancer.enhance(3.0)
+        bilder_att_testa.append(high_contrast_img)
+        
+        # 3. Zooma in mitten (Crop)
+        w, h = gray_img.size
+        cropped_img = high_contrast_img.crop((w*0.25, h*0.25, w*0.75, h*0.75))
+        bilder_att_testa.append(cropped_img)
+
+        # Testa att läsa alla varianter
+        for img in bilder_att_testa:
+            decodade = decode(img)
+            if decodade:
+                kod = decodade[0].data.decode("utf-8")
+                st.success(f"Lyckades läsa: {kod}")
+                break 
+        
+        if not kod:
+            st.warning("Kunde inte läsa koden. Försök hålla stilla & ha bra ljus!")
 
 else:
-    kod = st.text_input("Skriv in streckkod manuellt:")
+    kod = st.text_input("Skriv kod:")
 
-# --- HÄMTA DATA (Samma som förut) ---
+# --- VISA RESULTAT ---
 if kod:
     vara = hamta_matdata(kod)
     
     if vara:
         st.info(f"Hittade: **{vara['Namn']}**")
         
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Kcal", vara['Kcal'])
-        col2.metric("Prot", vara['Protein'])
-        col3.metric("Kolh", vara['Kolhydrater'])
-        col4.metric("Fett", vara['Fett'])
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Kcal", vara['Kcal'])
+        c2.metric("Prot", vara['Protein'])
+        c3.metric("Kolh", vara['Kolhydrater'])
+        c4.metric("Fett", vara['Fett'])
         
         st.divider()
         pris = st.number_input("Pris (kr):", min_value=0.0, step=1.0)
         
-        if st.button("Spara till Databasen 💾"):
+        if st.button("Spara 💾"):
             sheet = get_sheet()
             rad = [
                 vara['Namn'], vara['Kcal'], vara['Protein'], 
@@ -87,7 +104,7 @@ if kod:
             ]
             sheet.append_row(rad)
             st.balloons()
-            st.toast("Sparat!")
+            st.toast("Sparat i molnet!")
             
     else:
-        st.error("Kunde inte hitta varan i databasen.")
+        st.error("Kunde inte hitta varan.")
