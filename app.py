@@ -6,10 +6,18 @@ import requests
 SHEET_NAME = "kalorikollen"
 TAB_NAME = "Databas"
 
-# Koppla upp oss (cache gör att vi slipper logga in vid varje klick)
+# --- KOPPLING MOT GOOGLE ---
 @st.cache_resource
 def get_sheet():
-    gc = gspread.service_account(filename='service_account.json')
+    # Här kollar vi om vi är i molnet eller på din dator
+    try:
+        # Försök hämta nyckeln från Streamlits "Secrets" (Molnet)
+        credentials = dict(st.secrets["gcp_service_account"])
+        gc = gspread.service_account_from_dict(credentials)
+    except:
+        # Om det inte går, kör vi gamla vanliga filen (Din dator)
+        gc = gspread.service_account(filename='service_account.json')
+        
     return gc.open(SHEET_NAME).worksheet(TAB_NAME)
 
 def hamta_matdata(streckkod):
@@ -33,29 +41,23 @@ def hamta_matdata(streckkod):
 # --- APPENS UTSEENDE ---
 st.title("🍎 Min Kalorikoll")
 
-# Inmatningsfält
 kod = st.text_input("Skriv in streckkod:")
 
 if kod:
     vara = hamta_matdata(kod)
-    
     if vara:
         st.success(f"Hittade: {vara['Namn']}")
-        
-        # Visa data snyggt i kolumner
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Kcal", vara['Kcal'])
         col2.metric("Protein", vara['Protein'])
         col3.metric("Kolhydrater", vara['Kolhydrater'])
         col4.metric("Fett", vara['Fett'])
         
-        # Spara-knapp
         if st.button("Spara till Databasen"):
             sheet = get_sheet()
             rad = [vara['Namn'], vara['Kcal'], vara['Protein'], vara['Kolhydrater'], vara['Fett']]
             sheet.append_row(rad)
-            st.balloons() # 🎉 Lite festligt när man sparar
+            st.balloons()
             st.write("Sparat! ✅")
-            
     else:
         st.error("Kunde inte hitta varan.")
